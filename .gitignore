@@ -5,3 +5,8 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+
+# KiCad local files
+*.kicad_prl
+*-backups/
+fp-info-cache
