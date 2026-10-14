@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import re
 from pathlib import Path
 
@@ -35,6 +36,7 @@ vendor ZIP (import_part_zip) or build a symbol from the datasheet pin table
 Datasheets: datasheet_contents lists sections, search_datasheet finds the pages
 about a topic, read_datasheet reads them. Answer with the page numbers so the
 user can check, and read the page before stating a value from it.
+download_all_datasheets fetches every part's datasheet into the project at once.
 
 Drawing: place_part puts a symbol on the sheet, connect_pins joins pins to a
 named net (power nets such as GND or +3V3 get power symbols), mark_no_connect
@@ -506,6 +508,48 @@ def export_bom(
 # --------------------------------------------------------------------------- datasheets
 
 
+INDEX = "datasheets/index.json"
+
+
+def _index(proj: Project) -> dict[str, str]:
+    """Which file in datasheets/ belongs to which reference (kept by download_all_datasheets)."""
+    try:
+        return json.loads((proj.folder / INDEX).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_index(proj: Project, index: dict[str, str]) -> None:
+    path = proj.folder / INDEX
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = dict(sorted(index.items(), key=lambda kv: _natural_key(kv[0])))
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _local_datasheet(proj: Project, comp: Component) -> Path | None:
+    fields = {k.lower(): v for k, v in comp.fields.items() if v and v != "~"}
+    for key in ("datasheet file", "datasheet"):
+        val = fields.get(key, "")
+        if val and not re.match(r"^[a-z]+://|^//", val, re.IGNORECASE):
+            p = Path(val.replace("${KIPRJMOD}", str(proj.folder))).expanduser()
+            p = p if p.is_absolute() else proj.folder / p
+            if p.exists():
+                return p
+    listed = _index(proj).get(comp.ref)
+    if listed and (proj.folder / listed).exists():
+        return proj.folder / listed
+    for n in (bom.get_field(comp, "mpn"), comp.value, comp.ref):
+        p = proj.folder / "datasheets" / f"{datasheets.safe_name(n)}.pdf" if n else None
+        if p and p.exists():
+            return p
+    return None
+
+
+def _datasheet_url(comp: Component) -> str:
+    url = comp.datasheet if comp.datasheet and comp.datasheet != "~" else ""
+    return url if re.match(r"^(https?:)?//", url, re.IGNORECASE) else ""
+
+
 def _datasheet_file(proj: Project, ref_or_file: str) -> Path:
     """The local PDF for a part (downloading it into datasheets/ if needed), or a PDF path."""
     raw = ref_or_file.strip().strip('"')
@@ -516,27 +560,70 @@ def _datasheet_file(proj: Project, ref_or_file: str) -> Path:
             raise ProjectError(f"file not found: {p}")
         return p
     comp = _component(proj, raw)
-    fields = {k.lower(): v for k, v in comp.fields.items() if v and v != "~"}
-    for key in ("datasheet file", "datasheet"):
-        val = fields.get(key, "")
-        if val and not re.match(r"^[a-z]+://|^//", val, re.IGNORECASE):
-            p = Path(val.replace("${KIPRJMOD}", str(proj.folder))).expanduser()
-            p = p if p.is_absolute() else proj.folder / p
-            if p.exists():
-                return p
-    mpn = bom.get_field(comp, "mpn")
-    names = [n for n in (mpn, comp.value, comp.ref) if n]
-    for n in names:
-        p = proj.folder / "datasheets" / f"{datasheets.safe_name(n)}.pdf"
-        if p.exists():
-            return p
-    url = fields.get("datasheet", "")
-    if re.match(r"^(https?:)?//", url, re.IGNORECASE):
-        return datasheets.download(url, proj.folder / "datasheets", names[0])
+    local = _local_datasheet(proj, comp)
+    if local:
+        return local
+    url = _datasheet_url(comp)
+    if url:
+        path = datasheets.download(url, proj.folder / "datasheets", bom.get_field(comp, "mpn") or comp.value or comp.ref)
+        _save_index(proj, {**_index(proj), comp.ref: _rel(proj, path)})
+        return path
     raise ProjectError(
         f"{comp.ref} has no datasheet. Give it one with assign_part or set_fields (Datasheet), "
         "or save the PDF in the project's datasheets/ folder"
     )
+
+
+@tool
+def download_all_datasheets(use_distributors: bool = True, project_path: str | None = None) -> dict:
+    """Download the datasheet of every part on the schematic into the project's datasheets/ folder.
+
+    Uses each part's Datasheet link; for parts without one, looks the MPN up on Mouser/DigiKey
+    (use_distributors, when configured). Parts sharing a link share one file. Files already there
+    are kept. datasheets/index.json records which file belongs to which reference, so the
+    datasheet tools find them. The schematic itself is not changed.
+    """
+    proj = _project(project_path)
+    index = _index(proj)
+    by_url: dict[str, Path] = {}
+    result: dict = {"downloaded": {}, "already_there": {}, "failed": {}, "no_datasheet": []}
+    lookups = distributors.configured() if use_distributors else []
+    for comp in sorted(proj.schematic.components.values(), key=lambda c: _natural_key(c.ref)):
+        if not comp.in_bom and not comp.on_board:
+            continue
+        local = _local_datasheet(proj, comp)
+        if local:
+            index[comp.ref] = _rel(proj, local)
+            result["already_there"][comp.ref] = _rel(proj, local)
+            continue
+        url = _datasheet_url(comp)
+        mpn = bom.get_field(comp, "mpn")
+        if not url and mpn and lookups:
+            try:
+                url = next((p.datasheet_url for p in distributors.lookup(mpn) if p.datasheet_url), "")
+            except distributors.DistributorError as e:
+                result["failed"][comp.ref] = f"looking up {mpn}: {e}"
+                continue
+        if not url:
+            result["no_datasheet"].append(comp.ref)
+            continue
+        try:
+            if url not in by_url:
+                name = mpn or comp.value or comp.ref
+                tail = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+                if not mpn and tail.lower().endswith(".pdf"):
+                    name = tail[:-4]  # generic datasheets shared by many values keep the vendor's file name
+                by_url[url] = datasheets.download(url, proj.folder / "datasheets", name)
+            index[comp.ref] = _rel(proj, by_url[url])
+            result["downloaded"][comp.ref] = index[comp.ref]
+        except datasheets.DatasheetError as e:
+            result["failed"][comp.ref] = str(e)
+    if index:
+        _save_index(proj, index)
+    result["files"] = len({*index.values()})
+    if result["failed"]:
+        result["note"] = "for failed ones, open the link in a browser and save the PDF into datasheets/ named after the MPN or value"
+    return {k: v for k, v in result.items() if v or k == "files"}
 
 
 def _rel(proj: Project, p: Path) -> str:
