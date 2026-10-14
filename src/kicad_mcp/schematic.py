@@ -268,7 +268,7 @@ class _Loader:
             self.warnings.append(f"sheet nesting too deep at {human}")
             return
         doc = self.doc(path)
-        self.sheets.append({"path": human, "file": str(path.relative_to(self.root.parent))})
+        self.sheets.append({"path": human, "file": str(path.relative_to(self.root.parent)), "instance": inst_path})
         scope = inst_path  # local labels are unique per sheet instance
         lib = {s[1]: s for s in sexpr.children(sexpr.child(doc, "lib_symbols") or ["lib_symbols"], "symbol")}
 

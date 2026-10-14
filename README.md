@@ -20,7 +20,7 @@ Ask things like:
 | --- | --- | --- |
 | 1 | Read and check a design: components, nets, pins, ERC, DRC, board info | **done (v0.1)** |
 | 2 | Parts pipeline: search Mouser / DigiKey, download datasheets, symbols and footprints into a project library, purchase-ready BOM | **done (v0.2)** |
-| 3 | Datasheet assistant (answers with page references, pin-table checks) and schematic editing (place and wire parts) | planned |
+| 3 | Datasheet assistant (search and read datasheets with page numbers) and schematic editing (place and wire parts) | **done (v0.3)** |
 | 4 | SPICE: export netlist, run ngspice, generate behavioral models from datasheets, KiCad plugin button | planned |
 
 ## Install
@@ -126,6 +126,21 @@ Put them in a settings file, `%APPDATA%\kicad-mcp\config.json` on Windows or
 Environment variables with the same names also work and take priority.
 Everything else (KiCad library search, symbol creation, ZIP import, BOM without prices) works without keys.
 
+Datasheets and schematic drawing:
+
+| Tool | What it does |
+| --- | --- |
+| `datasheet_contents` | A part's datasheet sections with page numbers (downloads the PDF into `datasheets/` the first time) |
+| `search_datasheet` | Pages where the datasheet talks about something, with the matching lines and printed page numbers |
+| `read_datasheet` | Text of chosen pages; `layout` keeps table columns aligned for pin and electrical tables |
+| `place_part` | Put a library symbol on the schematic in a free spot (or near another part), with value, footprint and fields |
+| `connect_pins` | Connect pins to a net with short wires and net labels, or power symbols for GND, +3V3, +5V and similar |
+| `mark_no_connect` | Flag pins that are meant to stay unconnected |
+
+`connect_pins` never draws long wires across the sheet, so it cannot short something by
+accident, and every edit is checked against the netlist and undone if any other net would change.
+Parts and labels land on KiCad's grid; tidy the layout in KiCad as you like.
+
 Files are re-read when they change, so save in KiCad and ask again.
 
 ## How it works
@@ -142,7 +157,9 @@ uv pip install -e ".[dev]"
 pytest
 ```
 
-Tests that run ERC and DRC are skipped when `kicad-cli` is not installed.
+Tests that run ERC and DRC are skipped when `kicad-cli` is not installed. `tests/data/kicad_share`
+holds a few symbols copied from KiCad's stock libraries (CC-BY-SA 4.0 with the KiCad libraries'
+exception) so placement tests run without KiCad.
 
 ## License
 
