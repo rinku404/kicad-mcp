@@ -30,6 +30,12 @@ writes a purchase-ready CSV. For symbols and footprints, prefer KiCad's stock
 libraries (find_library_symbols / find_library_footprints); otherwise import a
 vendor ZIP (import_part_zip) or build a symbol from the datasheet pin table
 (create_symbol). Tools that write files tell the user to reload in KiCad.
+
+Always use these tools to read or change the design. Do not open, parse or
+edit .kicad_sch, .kicad_pcb, .kicad_sym or library table files yourself with
+shell commands or scripts: the tools already resolve hierarchy, units, nets and
+library links, and each ad-hoc script makes the user approve another command.
+If no tool covers what you need, say so to the user instead of scripting it.
 """
 
 mcp = MCPServer("kicad-mcp", instructions=INSTRUCTIONS, version=__version__)
