@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import __version__, bom, config, datasheets, distributors, kicad_cli, libraries, sexpr
+from . import project_info as project_info_md
 from . import schematic_place as place
 from .project import Project, ProjectError
 from .schematic import Component, _natural_key
@@ -20,7 +22,13 @@ INSTRUCTIONS = """\
 Tools for reading, checking, sourcing parts for and drawing a KiCad 9/10 design.
 
 Start with open_project (a .kicad_pro, .kicad_sch, .kicad_pcb or project folder);
-every other tool then works on that project unless you pass project_path.
+every other tool then works on that project unless you pass project_path. When the
+client was opened inside a KiCad project folder, that project is used automatically.
+
+At the start of every conversation, call project_info. If it returns ask_user, ask
+the user those questions in one message before anything else, then store the
+answers with save_project_info (it updates PROJECT.md and the schematic title
+block). Use the project's purpose and requirements when giving design advice.
 Files are re-read automatically when they change on disk, so save in KiCad
 before asking about recent edits. Pins are written REF.PIN, for example U1.3
 or U1.VCC (pin number or pin name).
@@ -87,6 +95,10 @@ def _project(project_path: str | None = None) -> Project:
         _current = _projects[key]
         return _current
     if _current is None:
+        # agy and similar clients start the server in the folder they were opened in
+        here = Path(os.environ.get("KICAD_MCP_PROJECT") or os.getcwd())
+        if here.is_dir() and len(list(here.glob("*.kicad_pro"))) == 1:
+            return _project(str(here))
         raise ProjectError("no project is open; call open_project first")
     return _current
 
@@ -142,7 +154,13 @@ def open_project(path: str) -> dict:
 
     path: a .kicad_pro, .kicad_sch or .kicad_pcb file, or the project folder.
     """
-    return _project(path).summary()
+    proj = _project(path)
+    summary = proj.summary()
+    ask = project_info_md.missing(project_info_md.read(proj.folder)[0])
+    if any(a["required"] for a in ask):
+        summary["ask_user"] = ask
+        summary["ask_user_note"] = "PROJECT.md is missing or incomplete; ask these, then call save_project_info"
+    return summary
 
 
 @tool
@@ -706,6 +724,63 @@ def read_datasheet(
     result: dict = {"file": _rel(proj, doc.path), "pages": out}
     if len(out) < len(nums):
         result["note"] = f"stopped after {len(out)} pages to keep the answer short; ask for the rest separately"
+    return result
+
+
+# --------------------------------------------------------------------------- project information
+
+
+@tool
+def project_info(project_path: str | None = None) -> dict:
+    """What the project is: designer, purpose, revision and so on, from PROJECT.md in the project folder.
+
+    Call this at the start of a conversation. When "ask_user" is present, ask the user those
+    questions (all in one message, the required ones first; optional ones may be skipped),
+    then save the answers with save_project_info.
+    """
+    proj = _project(project_path)
+    fields, notes = project_info_md.read(proj.folder)
+    result: dict = {"file": project_info_md.FILE, "exists": (proj.folder / project_info_md.FILE).exists()}
+    result["fields"] = {k: v for k, v in fields.items() if v}
+    if notes:
+        result["notes"] = notes
+    ask = project_info_md.missing(fields)
+    if any(a["required"] for a in ask):
+        result["ask_user"] = ask  # first time: ask everything still empty
+    elif ask:
+        result["optional_missing"] = [a["field"] for a in ask]
+    return result
+
+
+@tool
+def save_project_info(fields: dict[str, str], notes: str | None = None, project_path: str | None = None) -> dict:
+    """Save project information to PROJECT.md and the title block of every schematic page.
+
+    fields: any of Title, Designer, Purpose, Company, Revision, Date, Requirements, Status.
+    Given fields replace the old values; others are kept. notes replaces the Notes section.
+    Title, Revision, Date (today if empty), Company, Designer and Purpose go into the title
+    block (Designer and Purpose as comment lines); sub-sheets keep their own titles.
+    """
+    proj = _project(project_path)
+    unknown = sorted(set(fields) - set(project_info_md.NAMES))
+    if unknown:
+        raise ProjectError(f"unknown field(s) {', '.join(unknown)}; use {', '.join(project_info_md.NAMES)}")
+    old, old_notes = project_info_md.read(proj.folder)
+    merged = {**old, **{k: (v or "").strip() for k, v in fields.items()}}
+    path = project_info_md.write(proj.folder, merged, old_notes if notes is None else notes)
+    written = []
+    if proj.schematic_path is not None:
+        values = project_info_md.title_block_values(merged)
+        root = proj.schematic_path.resolve()
+        for f in dict.fromkeys(p.resolve() for p in _sheet_files(proj)):
+            if project_info_md.set_title_block(f, values, set_title=(f == root)):
+                written.append(f.name)
+    result: dict = {"file": str(path), "fields": {k: v for k, v in merged.items() if v}, "title_block_written": written}
+    still = [m["field"] for m in project_info_md.missing(merged) if m["required"]]
+    if still:
+        result["still_missing"] = still
+    if written:
+        result["note"] = RELOAD_NOTE
     return result
 
 
