@@ -9,18 +9,27 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import __version__, kicad_cli
+from . import __version__, bom, config, datasheets, distributors, kicad_cli, libraries
 from .project import Project, ProjectError
 from .schematic import Component, _natural_key
+from .schematic_edit import set_symbol_fields
 
 INSTRUCTIONS = """\
-Tools for reading and checking a KiCad 9/10 design.
+Tools for reading, checking and sourcing parts for a KiCad 9/10 design.
 
 Start with open_project (a .kicad_pro, .kicad_sch, .kicad_pcb or project folder);
 every other tool then works on that project unless you pass project_path.
 Files are re-read automatically when they change on disk, so save in KiCad
 before asking about recent edits. Pins are written REF.PIN, for example U1.3
 or U1.VCC (pin number or pin name).
+
+Sourcing: search_parts / get_part find parts on Mouser and DigiKey; assign_part
+writes MPN, manufacturer, distributor part numbers, links and the datasheet into
+a schematic symbol (and saves the datasheet PDF in the project); export_bom
+writes a purchase-ready CSV. For symbols and footprints, prefer KiCad's stock
+libraries (find_library_symbols / find_library_footprints); otherwise import a
+vendor ZIP (import_part_zip) or build a symbol from the datasheet pin table
+(create_symbol). Tools that write files tell the user to reload in KiCad.
 """
 
 mcp = MCPServer("kicad-mcp", instructions=INSTRUCTIONS, version=__version__)
@@ -34,7 +43,14 @@ def tool(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except (ProjectError, kicad_cli.KiCadCliError, OSError, ValueError) as e:
+        except (
+            ProjectError,
+            kicad_cli.KiCadCliError,
+            distributors.DistributorError,
+            datasheets.DatasheetError,
+            OSError,
+            ValueError,
+        ) as e:
             raise ToolError(str(e)) from e
 
     mcp.tool()(wrapper)
@@ -245,6 +261,225 @@ def kicad_status() -> dict:
         "server_version": __version__,
         "hint": None if exe else "Install KiCad 10 or set KICAD_CLI to the full path of kicad-cli.",
     }
+
+
+# --------------------------------------------------------------------------- step 2: parts, libraries, BOM
+
+RELOAD_NOTE = (
+    "If this schematic is open in KiCad, reload it (File > Revert) before making more edits there, "
+    "otherwise saving in KiCad will overwrite these changes."
+)
+
+
+def _sheet_files(proj: Project) -> list[Path]:
+    return [proj.folder / s["file"] for s in proj.schematic.sheets]
+
+
+def _library(proj: Project) -> libraries.ProjectLibrary:
+    return libraries.project_library(proj.folder, proj.name)
+
+
+@tool
+def distributor_status() -> dict:
+    """Which distributor APIs (Mouser, DigiKey) are configured, and where KiCad's libraries are."""
+    share = libraries.share_dir()
+    return {
+        **distributors.status(),
+        "settings_file": str(config.config_path()),
+        "kicad_libraries": str(share) if share else None,
+    }
+
+
+@tool
+def search_parts(query: str, limit: int = 10, source: str | None = None) -> dict:
+    """Search Mouser and/or DigiKey by keyword or part number, e.g. "LM358 SOIC", "10k 0603 1%", "USB-C receptacle".
+
+    source: "mouser" or "digikey" to ask only one. Returns price breaks, stock, datasheet and product links.
+    """
+    return distributors.search(query, max(1, min(limit, 50)), source)
+
+
+@tool
+def get_part(part_number: str, source: str | None = None) -> list[dict]:
+    """Full details for one manufacturer or distributor part number, including all parametric attributes."""
+    parts = distributors.lookup(part_number, source)
+    if not parts:
+        raise ProjectError(f"no part {part_number!r} found")
+    return [p.to_dict() for p in parts]
+
+
+@tool
+def download_datasheet(url: str, name: str, project_path: str | None = None) -> dict:
+    """Save a datasheet PDF into the project's datasheets/ folder. name: file name without .pdf, e.g. the MPN."""
+    proj = _project(project_path)
+    path = datasheets.download(url, proj.folder / "datasheets", name)
+    return {"file": str(path), "kicad_field": "${KIPRJMOD}/" + path.relative_to(proj.folder).as_posix()}
+
+
+@tool
+def assign_part(
+    ref: str,
+    part_number: str,
+    source: str | None = None,
+    save_datasheet: bool = True,
+    project_path: str | None = None,
+) -> dict:
+    """Attach a real, orderable part to a schematic symbol.
+
+    Looks the part up on the configured distributors, then writes MPN, Manufacturer,
+    Mouser PN / Mouser URL, DigiKey PN / DigiKey URL and Datasheet fields into the
+    symbol, and (save_datasheet) stores the PDF under datasheets/ as "Datasheet File".
+    It does not change the symbol's value or footprint; check those match the part.
+    """
+    proj = _project(project_path)
+    comp = _component(proj, ref)
+    parts = distributors.lookup(part_number, source)
+    if not parts:
+        raise ProjectError(f"no part {part_number!r} found on {source or 'the configured distributors'}")
+    first = parts[0]
+    by_source = {p.source: p for p in reversed(parts)}
+    # find the same MPN on the other distributor too
+    for client in distributors.configured():
+        if client.name not in by_source and first.mpn:
+            try:
+                match = [p for p in client.lookup(first.mpn) if p.mpn.upper() == first.mpn.upper()]
+            except distributors.DistributorError:
+                match = []
+            if match:
+                by_source[client.name] = match[0]
+
+    fields = {bom.FIELD_NAMES["mpn"]: first.mpn, bom.FIELD_NAMES["manufacturer"]: first.manufacturer}
+    for src, part in by_source.items():
+        fields[bom.FIELD_NAMES[src]] = part.distributor_pn
+        fields[bom.FIELD_NAMES[f"{src}_url"]] = part.product_url
+    datasheet_url = next((p.datasheet_url for p in by_source.values() if p.datasheet_url), "")
+    if datasheet_url:
+        fields["Datasheet"] = datasheet_url
+    result: dict = {"ref": comp.ref, "part": first.to_dict(attributes=False)}
+    if save_datasheet and datasheet_url:
+        try:
+            path = datasheets.download(datasheet_url, proj.folder / "datasheets", first.mpn or part_number)
+            fields["Datasheet File"] = "${KIPRJMOD}/" + path.relative_to(proj.folder).as_posix()
+            result["datasheet_file"] = str(path)
+        except datasheets.DatasheetError as e:
+            result["datasheet_error"] = str(e)
+    result["fields"] = fields
+    result["edit"] = set_symbol_fields(_sheet_files(proj), comp.ref, {k: v for k, v in fields.items() if v})
+    result["check"] = f"value is {comp.value!r}, footprint is {comp.footprint!r}; confirm they match {first.mpn}"
+    result["note"] = RELOAD_NOTE
+    return result
+
+
+@tool
+def set_fields(ref: str, fields: dict[str, str], project_path: str | None = None) -> dict:
+    """Set fields on a schematic symbol, e.g. {"Value": "10k", "Footprint": "Resistor_SMD:R_0603_1608Metric", "MPN": "..."}.
+
+    Existing fields are updated in place; new ones are added hidden. The reference cannot be changed here.
+    """
+    proj = _project(project_path)
+    comp = _component(proj, ref)
+    result = set_symbol_fields(_sheet_files(proj), comp.ref, fields)
+    result["note"] = RELOAD_NOTE
+    return result
+
+
+@tool
+def find_library_symbols(query: str, limit: int = 20) -> list[dict]:
+    """Search KiCad's stock symbol libraries by name, description or keywords, e.g. "LM358", "LDO 3.3V", "ESP32"."""
+    return libraries.find_symbols(query, max(1, min(limit, 100)))
+
+
+@tool
+def find_library_footprints(query: str, limit: int = 20) -> list[str]:
+    """Search KiCad's stock footprints by name, e.g. "SOIC-8", "R_0603", "SOT-23-5", "USB_C Receptacle"."""
+    return libraries.find_footprints(query, max(1, min(limit, 100)))
+
+
+@tool
+def add_library_symbol(
+    symbol: str,
+    new_name: str | None = None,
+    fields: dict[str, str] | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Copy a stock symbol (e.g. "Amplifier_Operational:LM358") into the project's own library.
+
+    new_name renames it (e.g. a specific MPN); fields sets properties such as Footprint, Datasheet, MPN.
+    The project library is created and registered in the project's library tables if needed.
+    """
+    proj = _project(project_path)
+    lib = _library(proj)
+    lib_id = libraries.copy_stock_symbol(lib, symbol, new_name, fields or {})
+    return {"symbol": lib_id, "library_file": str(lib.symbol_file), "note": "Reopen the project in KiCad to see new library entries."}
+
+
+@tool
+def create_symbol(
+    name: str,
+    pins: list[dict],
+    reference: str = "U",
+    footprint: str = "",
+    datasheet: str = "",
+    description: str = "",
+    fields: dict[str, str] | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Create a rectangular symbol in the project library from a pin table, e.g. one read from a datasheet.
+
+    pins: [{"number": "1", "name": "VIN", "type": "power_in", "side": "left"}, ...]. type is a KiCad
+    pin type (input, output, bidirectional, tri_state, passive, power_in, power_out, open_collector,
+    open_emitter, no_connect, unspecified, free); side (left/right/top/bottom) is optional.
+    Double-check every pin number against the datasheet's pinout for the exact package.
+    """
+    proj = _project(project_path)
+    lib = _library(proj)
+    lib.ensure()
+    block = libraries.generate_symbol(name, pins, reference, footprint, datasheet, description, fields)
+    libraries.upsert_symbols(lib.symbol_file, [block])
+    return {
+        "symbol": f"{lib.nickname}:{name}",
+        "pins": len(pins),
+        "library_file": str(lib.symbol_file),
+        "note": "Reopen the project in KiCad to see new library entries.",
+    }
+
+
+@tool
+def import_part_zip(zip_path: str, project_path: str | None = None) -> dict:
+    """Import symbols, footprints and 3D models from a vendor ZIP into the project library.
+
+    Works with KiCad-format downloads from Mouser's "ECAD Model" (SamacSys / Component Search
+    Engine), SnapEDA and Ultra Librarian. The user downloads the ZIP in their browser and gives its path.
+    """
+    proj = _project(project_path)
+    result = libraries.import_ecad_zip(_library(proj), Path(zip_path).expanduser())
+    result["note"] = "Reopen the project in KiCad to see new library entries."
+    return result
+
+
+@tool
+def export_bom(
+    boards: int = 1,
+    spare_percent: float = 0,
+    with_pricing: bool = False,
+    file_name: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Write a purchase-ready BOM (CSV) to the project's bom/ folder and report anything missing.
+
+    Groups identical parts, multiplies by boards (+ spare_percent extra), and with_pricing looks up
+    current price and stock on Mouser/DigiKey using each part's distributor PN or MPN. The CSV
+    can be uploaded to Mouser's or DigiKey's BOM tool.
+    """
+    proj = _project(project_path)
+    name = datasheets.safe_name(file_name or f"{proj.name}_bom")
+    return bom.export(
+        proj.schematic,
+        proj.folder / "bom" / f"{name}.csv",
+        boards=max(1, boards),
+        spare_percent=max(0.0, spare_percent),
+        with_pricing=with_pricing,
+    )
 
 
 def main() -> None:
