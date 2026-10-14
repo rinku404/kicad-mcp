@@ -132,6 +132,7 @@ Datasheets and schematic drawing:
 | --- | --- |
 | `datasheet_contents` | A part's datasheet sections with page numbers (downloads the PDF into `datasheets/` the first time) |
 | `search_datasheet` | Pages where the datasheet talks about something, with the matching lines and printed page numbers |
+| `download_all_datasheets` | Download every part's datasheet into `datasheets/` (from its Datasheet link, or Mouser/DigiKey by MPN) |
 | `read_datasheet` | Text of chosen pages; `layout` keeps table columns aligned for pin and electrical tables |
 | `place_part` | Put a library symbol on the schematic in a free spot (or near another part), with value, footprint and fields |
 | `connect_pins` | Connect pins to a net with short wires and net labels, or power symbols for GND, +3V3, +5V and similar |

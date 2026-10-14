@@ -2,6 +2,7 @@
 
 import csv
 import http.server
+import json
 import shutil
 import threading
 
@@ -101,3 +102,24 @@ def test_edited_schematic_loads_in_kicad(project):
     server.set_fields("R2", {"MPN": "X", "Value": "4.7k"})
     nets = kicad_cli.export_netlist(project / "divider.kicad_sch")
     assert {(n["ref"], n["pin"]) for n in nets["/MID"]} == {("R1", "2"), ("R2", "1"), ("R3", "2")}
+
+
+def test_download_all_datasheets(project, pdf_server, monkeypatch):
+    fakes.install(monkeypatch, datasheet_url=f"{pdf_server}/lm358.pdf")
+    server.open_project(str(project / "divider.kicad_pro"))
+    server.set_fields("R1", {"Datasheet": f"{pdf_server}/docs/generic-resistor.pdf"})
+    server.set_fields("R2", {"Datasheet": f"{pdf_server}/docs/generic-resistor.pdf"})
+    server.set_fields("R3", {"Datasheet": "~", "MPN": "LM358DR"})  # no link: found through the MPN
+    out = server.download_all_datasheets()
+    assert out["downloaded"] == {
+        "R1": "datasheets/generic-resistor.pdf",
+        "R2": "datasheets/generic-resistor.pdf",
+        "R3": "datasheets/LM358DR.pdf",
+    }
+    assert out["files"] == 2
+    index = json.loads((project / "datasheets" / "index.json").read_text(encoding="utf-8"))
+    assert index["R2"] == "datasheets/generic-resistor.pdf"
+    # the datasheet tools use the index, and a second run downloads nothing
+    assert server._datasheet_file(server._project(), "R2").name == "generic-resistor.pdf"
+    again = server.download_all_datasheets()
+    assert "downloaded" not in again and set(again["already_there"]) == {"R1", "R2", "R3"}
