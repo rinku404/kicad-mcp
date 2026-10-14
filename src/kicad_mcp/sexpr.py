@@ -105,3 +105,46 @@ def at(node: Node) -> tuple[float, float, float]:
 
 def properties(node: Node) -> dict[str, str]:
     return {p[1]: p[2] for p in children(node, "property") if len(p) >= 3 and isinstance(p[2], str)}
+
+
+# --------------------------------------------------------------------------- text spans
+# Editing helpers: find where nodes sit in the original text so files can be
+# changed with small, targeted edits instead of being re-serialised.
+
+
+def child_spans(text: str, start: int = 0, end: int | None = None) -> list[tuple[int, int]]:
+    """Return ``(begin, end)`` offsets of the direct child lists of the list at ``start``.
+
+    ``start`` must point at the opening parenthesis of a list; ``end`` defaults to
+    the end of the text. The returned ``end`` offsets are exclusive.
+    """
+    n = len(text) if end is None else end
+    if text[start] != "(":
+        raise ValueError("start must point at '('")
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    i = start
+    child_start = -1
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif c == "(":
+            depth += 1
+            if depth == 2:
+                child_start = i
+        elif c == ")":
+            if depth == 2:
+                spans.append((child_start, i + 1))
+            depth -= 1
+            if depth == 0:
+                return spans
+        i += 1
+    raise ValueError("unbalanced list")
+
+
+def quote(value: str) -> str:
+    """Quote a string the way KiCad writes it."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'

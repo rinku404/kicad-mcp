@@ -11,13 +11,15 @@ Ask things like:
 - "What's on the `/SDA` net, and does it have a pull-up?"
 - "Run ERC and explain the errors."
 - "Which parts are missing a datasheet or footprint?"
+- "Find an LM358 in SOIC-8 on Mouser and assign it to U1, with the datasheet."
+- "Export a BOM for 10 boards with current prices."
 
 ## Roadmap
 
 | Step | What | Status |
 | --- | --- | --- |
 | 1 | Read and check a design: components, nets, pins, ERC, DRC, board info | **done (v0.1)** |
-| 2 | Parts pipeline: search Mouser / DigiKey, download datasheets, symbols and footprints into a project library, purchase-ready BOM | planned |
+| 2 | Parts pipeline: search Mouser / DigiKey, download datasheets, symbols and footprints into a project library, purchase-ready BOM | **done (v0.2)** |
 | 3 | Datasheet assistant (answers with page references, pin-table checks) and schematic editing (place and wire parts) | planned |
 | 4 | SPICE: export netlist, run ngspice, generate behavioral models from datasheets, KiCad plugin button | planned |
 
@@ -57,6 +59,15 @@ On Windows the command is `C:\\path\\to\\kicad-mcp\\.venv\\Scripts\\kicad-mcp.ex
 claude mcp add kicad -- /full/path/to/kicad-mcp/.venv/bin/kicad-mcp
 ```
 
+### Antigravity CLI (Google)
+
+```bash
+agy mcp add kicad /full/path/to/kicad-mcp/.venv/bin/kicad-mcp
+```
+
+To stop it asking before every call, add `"mcp(kicad/*)"` to `permissions.allow` in
+`~/.gemini/antigravity-cli/settings.json`.
+
 ## Tools
 
 | Tool | What it does |
@@ -71,6 +82,49 @@ claude mcp add kicad -- /full/path/to/kicad-mcp/.venv/bin/kicad-mcp
 | `run_drc` | KiCad design rules check, including schematic/board parity |
 | `list_footprints` | Footprints with side, position, rotation and pad nets |
 | `kicad_status` | Is `kicad-cli` available, and which version |
+
+Parts, libraries and BOM:
+
+| Tool | What it does |
+| --- | --- |
+| `distributor_status` | Which distributor APIs are configured, and where KiCad's libraries are |
+| `search_parts` | Keyword search on Mouser and DigiKey with price breaks, stock and links |
+| `get_part` | Full details and parameters for one part number |
+| `assign_part` | Write MPN, manufacturer, Mouser/DigiKey part numbers and links, and the datasheet into a symbol; save the PDF in `datasheets/` |
+| `set_fields` | Set any fields on a symbol (value, footprint, MPN, ...) |
+| `download_datasheet` | Save a datasheet PDF into the project |
+| `find_library_symbols` / `find_library_footprints` | Search KiCad's stock libraries |
+| `add_library_symbol` | Copy a stock symbol into the project library, renamed and with fields set |
+| `create_symbol` | Build a symbol from a pin table (for example, read from a datasheet) |
+| `import_part_zip` | Import a KiCad-format ZIP from Mouser/SamacSys, SnapEDA or Ultra Librarian |
+| `export_bom` | Purchase-ready CSV in `bom/`, grouped, multiplied by board count, optionally priced |
+
+New symbols, footprints and 3D models go into a library inside the project (`libs/<project>.kicad_sym`,
+`libs/<project>.pretty`, `libs/3dmodels`), registered in the project's library tables.
+Tools that change the schematic write the file directly: if it is open in KiCad, use
+File → Revert afterwards so KiCad does not overwrite the change when you save.
+
+### Distributor API keys (optional)
+
+Search, pricing and `assign_part` need at least one of these (both are free):
+
+- **Mouser**: request a Search API key at <https://www.mouser.com/api-hub/>.
+- **DigiKey**: create an app with the *Product Information v4* API at <https://developer.digikey.com/>
+  to get a client ID and secret. Optional: `DIGIKEY_LOCALE_SITE` (e.g. `BR`), `DIGIKEY_LOCALE_CURRENCY` (e.g. `BRL`).
+
+Put them in a settings file, `%APPDATA%\kicad-mcp\config.json` on Windows or
+`~/.config/kicad-mcp/config.json` elsewhere:
+
+```json
+{
+  "MOUSER_API_KEY": "...",
+  "DIGIKEY_CLIENT_ID": "...",
+  "DIGIKEY_CLIENT_SECRET": "..."
+}
+```
+
+Environment variables with the same names also work and take priority.
+Everything else (KiCad library search, symbol creation, ZIP import, BOM without prices) works without keys.
 
 Files are re-read when they change, so save in KiCad and ask again.
 
