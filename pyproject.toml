@@ -1,13 +1,13 @@
 [project]
 name = "kicad-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server that lets LLMs read, check and work with KiCad projects"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "Paulo" }]
 keywords = ["kicad", "mcp", "eda", "llm", "pcb", "schematic"]
-dependencies = ["mcp>=2.3,<3"]
+dependencies = ["mcp>=2.3,<3", "pypdf>=4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
