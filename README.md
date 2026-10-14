@@ -132,11 +132,17 @@ Datasheets and schematic drawing:
 | --- | --- |
 | `datasheet_contents` | A part's datasheet sections with page numbers (downloads the PDF into `datasheets/` the first time) |
 | `search_datasheet` | Pages where the datasheet talks about something, with the matching lines and printed page numbers |
+| `ask_datasheets` | Ask a question across every datasheet in the project and get the passages that answer it, each cited as file, page and section |
 | `download_all_datasheets` | Download every part's datasheet into `datasheets/` (from its Datasheet link, or Mouser/DigiKey by MPN) |
 | `read_datasheet` | Text of chosen pages; `layout` keeps table columns aligned for pin and electrical tables |
 | `place_part` | Put a library symbol on the schematic in a free spot (or near another part), with value, footprint and fields |
 | `connect_pins` | Connect pins to a net with short wires and net labels, or power symbols for GND, +3V3, +5V and similar |
 | `mark_no_connect` | Flag pins that are meant to stay unconnected |
+
+`ask_datasheets` works like NotebookLM, locally: PDFs in `datasheets/` are split into short
+passages and indexed in `datasheets/.rag/` (refreshed when PDFs change). Questions are matched
+by keywords and by meaning, using a small embedding model (BAAI/bge-small-en-v1.5, about 70 MB,
+downloaded once on first use and run on the CPU). Without it, keyword search still works.
 
 `connect_pins` never draws long wires across the sheet, so it cannot short something by
 accident, and every edit is checked against the netlist and undone if any other net would change.

@@ -10,7 +10,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import __version__, bom, config, datasheets, distributors, kicad_cli, libraries, sexpr
+from . import __version__, bom, config, datasheets, distributors, kicad_cli, libraries, rag, sexpr
 from . import schematic_place as place
 from .project import Project, ProjectError
 from .schematic import Component, _natural_key
@@ -36,7 +36,9 @@ vendor ZIP (import_part_zip) or build a symbol from the datasheet pin table
 Datasheets: datasheet_contents lists sections, search_datasheet finds the pages
 about a topic, read_datasheet reads them. Answer with the page numbers so the
 user can check, and read the page before stating a value from it.
-download_all_datasheets fetches every part's datasheet into the project at once.
+download_all_datasheets fetches every part's datasheet into the project at once;
+ask_datasheets then answers questions across all of them with page citations.
+Prefer ask_datasheets for questions, and cite its "cite" strings in the answer.
 
 Drawing: place_part puts a symbol on the sheet, connect_pins joins pins to a
 named net (power nets such as GND or +3V3 get power symbols), mark_no_connect
@@ -621,6 +623,10 @@ def download_all_datasheets(use_distributors: bool = True, project_path: str | N
     if index:
         _save_index(proj, index)
     result["files"] = len({*index.values()})
+    if index:
+        # build the search index now, so the first ask_datasheets answers quickly
+        changes = rag.Index(proj.folder / "datasheets").refresh(proj.folder)
+        result["search_index"] = f"{changes['files']} datasheets ready for ask_datasheets"
     if result["failed"]:
         result["note"] = "for failed ones, open the link in a browser and save the PDF into datasheets/ named after the MPN or value"
     return {k: v for k, v in result.items() if v or k == "files"}
@@ -707,6 +713,51 @@ def read_datasheet(
     if len(out) < len(nums):
         result["note"] = f"stopped after {len(out)} pages to keep the answer short; ask for the rest separately"
     return result
+
+
+@tool
+def ask_datasheets(question: str, parts: list[str] | None = None, limit: int = 6, project_path: str | None = None) -> dict:
+    """Find the passages in the project's datasheets that answer a question, with citations.
+
+    Searches every PDF in datasheets/ (run download_all_datasheets first), or only the
+    datasheets of parts (references such as ["U1", "U3"]). Matches by keywords and by meaning,
+    so plain questions work: "max input voltage of the regulator", "how hot can U1 get",
+    "recommended decoupling". Answer from the returned passages only and cite each fact with
+    its "cite" string, so the user can open the page and check.
+    """
+    proj = _project(project_path)
+    folder = proj.folder / "datasheets"
+    if not folder.is_dir() or not any(folder.glob("**/*.pdf")):
+        raise ProjectError("no datasheets in this project yet; run download_all_datasheets first")
+    files = None
+    if parts:
+        files = {_rel(proj, _datasheet_file(proj, p)) for p in parts}
+    index = rag.Index(folder)
+    changes = index.refresh(proj.folder)
+    hits, mode = index.search(question, files, max(1, min(limit, 20)))
+    owners: dict[str, list[str]] = {}
+    for ref, f in _index(proj).items():
+        owners.setdefault(f, []).append(ref)
+    results = []
+    for p, _score in hits:
+        page = f"p.{p.page}" + (f" (printed {p.printed_page})" if p.printed_page else "")
+        cite = f"{Path(p.file).name} {page}" + (f", {p.section}" if p.section else "")
+        r: dict = {"cite": cite, "file": p.file, "page": p.page, "text": p.text}
+        if p.section:
+            r["section"] = p.section
+        if owners.get(p.file):
+            r["parts"] = sorted(owners[p.file], key=_natural_key)
+        results.append(r)
+    out: dict = {"question": question, "search": mode, "results": results}
+    if changes["indexed"]:
+        out["newly_indexed"] = changes["indexed"]
+    if index.skipped:
+        out["not_searchable"] = index.skipped
+    if rag.embedder_error() and mode == "keywords":
+        out["note"] = rag.embedder_error()
+    if not results:
+        out["note"] = "nothing matched; try the datasheet's own terms or check the right datasheets are downloaded"
+    return out
 
 
 # --------------------------------------------------------------------------- drawing the schematic
