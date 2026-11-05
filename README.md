@@ -126,6 +126,17 @@ Put them in a settings file, `%APPDATA%\kicad-mcp\config.json` on Windows or
 Environment variables with the same names also work and take priority.
 Everything else (KiCad library search, symbol creation, ZIP import, BOM without prices) works without keys.
 
+Project information:
+
+| Tool | What it does |
+| --- | --- |
+| `project_info` | Reads `PROJECT.md` in the project folder and lists the questions still unanswered (title, designer, purpose, ...) |
+| `save_project_info` | Saves the answers to `PROJECT.md` and writes title, revision, date, company, designer and purpose into every sheet's title block |
+
+When agy (or another client) is started inside a KiCad project folder, that project opens by itself and
+the assistant asks for whatever `PROJECT.md` is missing. `PROJECT.md` is plain Markdown, so you can also
+edit it by hand and ask the assistant to sync it to the title block.
+
 Datasheets and schematic drawing:
 
 | Tool | What it does |
